@@ -1,0 +1,26 @@
+# Data — generated locally, never committed.
+# The generator is versioned; its output is not.
+data/
+*.xlsx
+*.xls
+*.csv
+*.parquet
+!data/raw/.gitkeep
+
+# Notebook outputs must never be committed: display() calls embed real
+# rows into the .ipynb. Run `nbstripout --install` after cloning.
+.ipynb_checkpoints/
+
+# Environment
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.env
+.databrickscfg
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
