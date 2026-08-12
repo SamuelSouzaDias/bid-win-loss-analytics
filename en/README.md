@@ -25,6 +25,10 @@ The first cut of the data showed Executive 4 closing 25.4% of bids against a 31.
 
 Isolating the effect moves Executive 4 from 25.4% to **42.2%** — from worst performer to slightly above the organic average. Every segment and regional ranking shifts the same way.
 
+![Win rate: bulk-loaded vs organic bids, and Executive 4's rate with and without bulk load](assets/migration_artefact.png)
+
+This isn't just a raw comparison — the bulk pool happens to be concentrated in the two lowest-converting segments (Financial Services, Public Sector), so the gap could in principle be segment mix wearing a migration-artefact costume. A logistic regression controlling for segment, state, and deal size says otherwise: the adjusted odds ratio for `is_bulk_load` is **0.22** (95% CI 0.16–0.30, p < 10⁻²⁰), barely different from the unadjusted 0.24. The effect is real, not a proxy for who happened to get bulk-loaded. Full model in [`04_analysis.ipynb`](04_analysis.ipynb).
+
 **2. Win rate by count hides a pricing problem.**
 
 The company wins small contracts and loses large ones:
@@ -35,6 +39,8 @@ The company wins small contracts and loses large ones:
 | Q2 | 37.3% |
 | Q3 | 24.4% |
 | Q4 (largest) | 22.6% |
+
+![Win rate by contract-value quartile, dropping from ~41% to ~23% as deal size increases](assets/win_rate_by_value.png)
 
 Counting bids gives a 31.3% win rate. Weighting by contract value gives **26.4%**. The five-point gap is entirely large deals being lost, and the recorded loss reasons point the same way: **87% of them are price or cost-structure related.**
 
@@ -63,7 +69,7 @@ raw/ (Volume)          bronze.bid          silver.bid           gold.bid
 | Layer | Responsibility |
 |---|---|
 | **Bronze** | Ingest as-is. No casting, no cleaning. Schema drift accepted and logged. |
-| **Silver** | Type casting, `'null'` string to true NULL, sentinel dates resolved, duplicate client rows collapsed, `is_bulk_load` flag derived. |
+| **Silver** | Type casting, `'null'` string to true NULL, sentinel dates resolved, clients modelled as an SCD Type 2 dimension, `is_bulk_load` flag derived. |
 | **Gold** | Business aggregates: win rate by count and by value, segmentation, loss reason distribution, open pipeline. |
 
 ### Design decisions worth naming
@@ -71,6 +77,8 @@ raw/ (Volume)          bronze.bid          silver.bid           gold.bid
 **Schema drift is accepted at Bronze, not rejected.** The source is a manual Excel export whose columns change without notice. Failing the load would stop the pipeline for a cosmetic change; accepting drift and validating at Silver keeps ingestion resilient and puts the contract where it belongs.
 
 **`is_bulk_load` is derived, not given.** Any row whose `created_at` is shared by ten or more other rows is flagged. Every downstream metric is reported both with and without it. This is the single transformation that changes the conclusions.
+
+**`clients` is an SCD Type 2 dimension, joined point-in-time.** A renewal is a second contract period for the same `client_id`, not a duplicate row to collapse. Every version is kept with an explicit `valid_from`/`valid_to`, and Gold matches each bid to the version that was valid *when the bid was placed* — not whichever version happens to be current today. Collapsing to "most recent row," the earlier approach, would have thrown away real contract history and (worse) attached today's client attributes to a bid from years before they applied.
 
 **Redundant columns are preserved in Bronze.** `created_at` and `created_at_str` carry the same information; the string version is dropped at Silver, not at ingestion, so the raw layer stays a faithful copy of the source.
 
@@ -88,7 +96,7 @@ The generator does not produce clean data. It deliberately reproduces the pathol
 - Closure timestamps written seconds apart, from records closed in a single sitting
 - Redundant raw and string-formatted date columns
 - Sentinel dates (`2999-12-31`) and literal `'null'` strings
-- Duplicate client rows from contract renewals
+- A second contract period for renewed clients, non-overlapping with the first
 
 Modelling those pathologies deliberately is the point. Clean synthetic data would make the analysis trivial and the pipeline pointless.
 
@@ -109,7 +117,7 @@ Modelling those pathologies deliberately is the point. Clean synthetic data woul
 | `client_id` | Foreign key to `clients` |
 | `contract_value_brl` | Monthly contract value |
 
-`clients` — 1,537 rows, 1,450 unique
+`clients` — 1,519 rows (raw), 1,450 unique clients. Silver adds `valid_from`, `valid_to`, `is_current`, and a `client_sk` surrogate key on top of the columns below — see [Design decisions](#design-decisions-worth-naming).
 
 | Column | Description |
 |---|---|
@@ -132,6 +140,8 @@ Stating these plainly matters more than the charts.
 **Contract value is monthly, not total.** Without contract duration, a twelve-month deal and a five-year deal of the same monthly value are indistinguishable. The value-weighted win rate is therefore directional.
 
 **No bid cost is recorded.** Win rate cannot be turned into return on bidding effort, which is what a commercial director actually needs to prioritise.
+
+**About 6% of bids can't be matched to a client contract period.** `clients` is modelled as an SCD Type 2 dimension (a client can have more than one contract version over time), and each bid is matched to the version valid *when the bid was placed* — not just whichever version is current today. Roughly 6% of bids don't land inside any known version's window, either because the client's contract start date is itself unknown or because the bid predates the earliest known contract. Those bids keep their outcome and value but show up with no segment/state/executive attached, rather than being silently force-matched to the wrong period.
 
 ---
 

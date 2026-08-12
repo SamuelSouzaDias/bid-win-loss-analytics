@@ -113,6 +113,22 @@ def iso_utc(dt: datetime) -> str:
     return dt.strftime("%Y-%m-%dT%H:%M:%S.000+00:00")
 
 
+def excel_style_datetime(dt: datetime) -> str:
+    """Match the raw export's string date column: '5/27/25 16:6' (no
+    leading zeros on month/day/hour).
+
+    strftime's '%-m' / '%-d' / '%-H' no-padding codes are a glibc/macOS
+    extension and raise ValueError on Windows. Padding manually with
+    strftime + str.lstrip keeps the same output cross-platform.
+    """
+    month = dt.strftime("%m").lstrip("0") or "0"
+    day = dt.strftime("%d").lstrip("0") or "0"
+    year = dt.strftime("%y")
+    hour = dt.strftime("%H").lstrip("0") or "0"
+    minute = dt.strftime("%M")
+    return f"{month}/{day}/{year} {hour}:{minute}"
+
+
 def random_datetime(rng, start: date, end: date) -> datetime:
     span = (end - start).days
     d = start + timedelta(days=int(rng.integers(0, span)))
@@ -186,10 +202,37 @@ def build_clients(rng) -> pd.DataFrame:
 
     df = pd.DataFrame(rows)
 
-    # A handful of clients appear twice (contract renewals recorded as new rows)
-    dupes = df.sample(frac=0.06, random_state=int(rng.integers(0, 10_000))).copy()
-    dupes["contract_name"] = dupes["contract_name"] + " (renewal)"
-    return pd.concat([df, dupes], ignore_index=True)
+    # A handful of clients renew: a second contract period for the same
+    # client_id, starting after the first one actually ends. Open-ended
+    # contracts (the 2999-12-31 sentinel) have nothing to renew from, so
+    # they're excluded from the sampling pool.
+    #
+    # The renewal's start_date is genuinely later than the original's
+    # end_date — not a same-day duplicate — because Silver's SCD Type 2
+    # dimension needs two non-overlapping validity windows to model, not
+    # two identical timestamps with no ordering to break the tie on.
+    renewable = df[df["end_date"] != date(2999, 12, 31)]
+    renewals = renewable.sample(
+        frac=0.06, random_state=int(rng.integers(0, 10_000))
+    ).copy()
+
+    gap_days = rng.integers(1, 45, size=len(renewals))
+    duration_days = rng.integers(180, 2200, size=len(renewals))
+    still_open = rng.random(len(renewals)) < 0.28
+
+    new_start = [
+        end + timedelta(days=int(gap))
+        for end, gap in zip(renewals["end_date"], gap_days)
+    ]
+    renewals["start_date"] = new_start
+    renewals["end_date"] = [
+        date(2999, 12, 31) if open_ended else start + timedelta(days=int(dur))
+        for start, dur, open_ended in zip(new_start, duration_days, still_open)
+    ]
+    renewals["contract_name"] = renewals["contract_name"] + " (renewal)"
+    renewals["status"] = "Active"  # renewing implies still active
+
+    return pd.concat([df, renewals], ignore_index=True)
 
 
 # --------------------------------------------------------------------------
@@ -353,12 +396,12 @@ def build_bids(rng, clients: pd.DataFrame) -> pd.DataFrame:
     out = pd.DataFrame({
         "bid_id": df["bid_id"],
         "created_at": df["_created_at"].map(iso_utc),
-        "created_at_str": df["_created_at"].dt.strftime("%-m/%-d/%y %-H:%M"),
+        "created_at_str": df["_created_at"].map(excel_style_datetime),
         "is_confirmed_date": df["is_confirmed_date"],
         "bid_date": df["_bid_date"].map(iso_utc),
         "closed_at": df["_closed_at"].map(lambda x: iso_utc(x) if pd.notna(x) else "-"),
         "closed_at_str": df["_closed_at"].map(
-            lambda x: x.strftime("%-m/%-d/%y %-H:%M") if pd.notna(x) else "null"),
+            lambda x: excel_style_datetime(x) if pd.notna(x) else "null"),
         "outcome": df["outcome"].map(lambda x: "null" if pd.isna(x) else int(x)),
         "loss_reason": df["loss_reason"].fillna("null"),
         "competitor_name": df["competitor_name"].fillna("null"),
